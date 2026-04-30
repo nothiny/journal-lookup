@@ -1,9 +1,78 @@
 // API配置
 const SEMANTIC_SCHOLAR_API = 'https://api.semanticscholar.org/graph/v1/paper/search';
+const CCF_DIRECTORY_URL = 'https://www.ccf.org.cn/Academic_Evaluation/By_category/';
 const REQUEST_TIMEOUT = 15000; // 15秒超时
 const MAX_RETRIES = 2; // 最大重试次数
 const MIN_SEARCH_INTERVAL = 1500; // 最小搜索间隔，避免过快触发限流
 const DEFAULT_RATE_LIMIT_COOLDOWN = 10000; // 429后的默认冷却时间
+
+const CCF_VENUE_MAPPINGS = [
+    { abbr: 'AAAI', level: 'A', aliases: ['aaai', 'aaai conference on artificial intelligence'] },
+    { abbr: 'ACL', level: 'A', aliases: ['acl', 'annual meeting of the association for computational linguistics'] },
+    { abbr: 'AAMAS', level: 'B', aliases: ['aamas', 'international conference on autonomous agents and multiagent systems'] },
+    { abbr: 'ACMMM', level: 'A', aliases: ['acm mm', 'acmmm', 'acm international conference on multimedia', 'international conference on multimedia'] },
+    { abbr: 'ASE', level: 'A', aliases: ['ase', 'international conference on automated software engineering'] },
+    { abbr: 'ASPLOS', level: 'A', aliases: ['asplos', 'architectural support for programming languages and operating systems'] },
+    { abbr: 'CCS', level: 'A', aliases: ['ccs', 'acm conference on computer and communications security'] },
+    { abbr: 'CHI', level: 'A', aliases: ['chi', 'conference on human factors in computing systems'] },
+    { abbr: 'CIKM', level: 'B', aliases: ['cikm', 'international conference on information and knowledge management'] },
+    { abbr: 'COLING', level: 'B', aliases: ['coling', 'international conference on computational linguistics'] },
+    { abbr: 'COLT', level: 'B', aliases: ['colt', 'conference on learning theory'] },
+    { abbr: 'CVPR', level: 'A', aliases: ['cvpr', 'ieee conference on computer vision and pattern recognition', 'ieee cvf conference on computer vision and pattern recognition'] },
+    { abbr: 'DAC', level: 'A', aliases: ['dac', 'design automation conference'] },
+    { abbr: 'ECCV', level: 'B', aliases: ['eccv', 'european conference on computer vision'] },
+    { abbr: 'ECIR', level: 'B', aliases: ['ecir', 'european conference on information retrieval'] },
+    { abbr: 'EMNLP', level: 'B', aliases: ['emnlp', 'conference on empirical methods in natural language processing'] },
+    { abbr: 'EUROCRYPT', level: 'A', aliases: ['eurocrypt', 'annual international conference on the theory and applications of cryptographic techniques'] },
+    { abbr: 'FAST', level: 'A', aliases: ['fast', 'usenix conference on file and storage technologies'] },
+    { abbr: 'FOCS', level: 'A', aliases: ['focs', 'annual ieee symposium on foundations of computer science'] },
+    { abbr: 'ICCAD', level: 'B', aliases: ['iccad', 'international conference on computer aided design'] },
+    { abbr: 'ICCV', level: 'A', aliases: ['iccv', 'international conference on computer vision'] },
+    { abbr: 'ICDE', level: 'A', aliases: ['icde', 'international conference on data engineering'] },
+    { abbr: 'ICDM', level: 'B', aliases: ['icdm', 'ieee international conference on data mining'] },
+    { abbr: 'ICLR', level: 'A', aliases: ['iclr', 'international conference on learning representations'] },
+    { abbr: 'ICML', level: 'A', aliases: ['icml', 'international conference on machine learning'] },
+    { abbr: 'ICSE', level: 'A', aliases: ['icse', 'international conference on software engineering'] },
+    { abbr: 'IJCAI', level: 'A', aliases: ['ijcai', 'international joint conference on artificial intelligence'] },
+    { abbr: 'INFOCOM', level: 'A', aliases: ['infocom', 'ieee international conference on computer communications'] },
+    { abbr: 'IROS', level: 'C', aliases: ['iros', 'ieee rsj international conference on intelligent robots and systems'] },
+    { abbr: 'ISCA', level: 'A', aliases: ['isca', 'international symposium on computer architecture'] },
+    { abbr: 'KDD', level: 'A', aliases: ['kdd', 'acm sigkdd international conference on knowledge discovery and data mining'] },
+    { abbr: 'MICRO', level: 'A', aliases: ['micro', 'ieee acm international symposium on microarchitecture'] },
+    { abbr: 'MM', level: 'C', aliases: ['mm', 'acm multimedia'] },
+    { abbr: 'MMSEC', level: 'C', aliases: ['mmsec', 'workshop on multimedia and security'] },
+    { abbr: 'MOBICOM', level: 'A', aliases: ['mobicom', 'annual international conference on mobile computing and networking'] },
+    { abbr: 'NAACL', level: 'B', aliases: ['naacl', 'north american chapter of the association for computational linguistics'] },
+    { abbr: 'NDSS', level: 'A', aliases: ['ndss', 'network and distributed system security symposium'] },
+    { abbr: 'NeurIPS', level: 'A', aliases: ['neurips', 'nips', 'conference on neural information processing systems', 'advances in neural information processing systems'] },
+    { abbr: 'NSDI', level: 'A', aliases: ['nsdi', 'usenix symposium on networked systems design and implementation'] },
+    { abbr: 'OSDI', level: 'A', aliases: ['osdi', 'usenix symposium on operating systems design and implementation'] },
+    { abbr: 'PAMI', level: 'A', aliases: ['pami', 'ieee transactions on pattern analysis and machine intelligence', 'tpami'] },
+    { abbr: 'PETS', level: 'B', aliases: ['pets', 'privacy enhancing technologies symposium'] },
+    { abbr: 'PLDI', level: 'A', aliases: ['pldi', 'acm sigplan conference on programming language design and implementation'] },
+    { abbr: 'PODS', level: 'A', aliases: ['pods', 'symposium on principles of database systems'] },
+    { abbr: 'PPoPP', level: 'A', aliases: ['ppopp', 'symposium on principles and practice of parallel programming'] },
+    { abbr: 'S&P', level: 'A', aliases: ['s p', 'oakland', 'ieee symposium on security and privacy'] },
+    { abbr: 'SC', level: 'A', aliases: ['sc', 'international conference for high performance computing networking storage and analysis', 'supercomputing'] },
+    { abbr: 'SIGGRAPH', level: 'A', aliases: ['siggraph', 'acm siggraph annual conference on computer graphics and interactive techniques'] },
+    { abbr: 'SIGIR', level: 'A', aliases: ['sigir', 'international acm sigir conference on research and development in information retrieval'] },
+    { abbr: 'SIGMOD', level: 'A', aliases: ['sigmod', 'international conference on management of data', 'acm sigmod international conference on management of data'] },
+    { abbr: 'SOSP', level: 'A', aliases: ['sosp', 'symposium on operating systems principles'] },
+    { abbr: 'STOC', level: 'A', aliases: ['stoc', 'annual acm symposium on theory of computing'] },
+    { abbr: 'TACL', level: 'B', aliases: ['tacl', 'transactions of the association for computational linguistics'] },
+    { abbr: 'TIFS', level: 'A', aliases: ['tifs', 'ieee transactions on information forensics and security'] },
+    { abbr: 'TKDE', level: 'A', aliases: ['tkde', 'ieee transactions on knowledge and data engineering'] },
+    { abbr: 'TOCHI', level: 'A', aliases: ['tochi', 'acm transactions on computer human interaction'] },
+    { abbr: 'TODS', level: 'A', aliases: ['tods', 'acm transactions on database systems'] },
+    { abbr: 'TOMM', level: 'B', aliases: ['tomm', 'acm transactions on multimedia computing communications and applications'] },
+    { abbr: 'TPDS', level: 'A', aliases: ['tpds', 'ieee transactions on parallel and distributed systems'] },
+    { abbr: 'TSE', level: 'A', aliases: ['tse', 'ieee transactions on software engineering'] },
+    { abbr: 'UAI', level: 'B', aliases: ['uai', 'conference on uncertainty in artificial intelligence'] },
+    { abbr: 'UIST', level: 'A', aliases: ['uist', 'annual acm symposium on user interface software and technology'] },
+    { abbr: 'USENIX Security', level: 'A', aliases: ['usenix security', 'usenix security symposium'] },
+    { abbr: 'VLDB', level: 'A', aliases: ['vldb', 'very large data bases', 'international conference on very large data bases'] },
+    { abbr: 'WWW', level: 'A', aliases: ['www', 'web conference', 'world wide web conference', 'international world wide web conference'] }
+];
 
 // DOM元素
 const paperInput = document.getElementById('paperInput');
@@ -21,6 +90,16 @@ const searchCache = new Map();
 
 function normalizeQuery(query) {
     return query.trim().toLowerCase();
+}
+
+function normalizeVenueName(text) {
+    return text
+        .toLowerCase()
+        .replace(/&/g, ' and ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\b(proceedings|conference|international|annual|ieee|acm|the|on|of|for|and|symposium|workshop|journal|transactions)\b/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 function getRemainingCooldownSeconds() {
@@ -47,6 +126,25 @@ function parseRetryAfterSeconds(value) {
 function setSearchControlsDisabled(disabled) {
     searchBtn.disabled = disabled;
     paperInput.disabled = disabled;
+}
+
+function resolveCcfVenue(paper) {
+    const candidates = [
+        getVenueInfo(paper),
+        paper.venue,
+        paper.publicationVenue && paper.publicationVenue.name
+    ].filter(Boolean);
+
+    const normalizedCandidates = candidates.map(normalizeVenueName);
+
+    for (const mapping of CCF_VENUE_MAPPINGS) {
+        const normalizedAliases = mapping.aliases.map(normalizeVenueName);
+        if (normalizedCandidates.some(candidate => normalizedAliases.includes(candidate))) {
+            return mapping;
+        }
+    }
+
+    return null;
 }
 
 // 带超时的 fetch 请求
@@ -379,10 +477,28 @@ function createPaperCard(paper, query) {
         
         const venueItem = createInfoItem(venueLabel, venueValue);
         info.appendChild(venueItem);
+
+        const ccfVenue = resolveCcfVenue(paper);
+        if (ccfVenue) {
+            const ccfItem = createLinkItem('🏷️ CCF简称', ccfVenue.abbr, CCF_DIRECTORY_URL);
+            ccfItem.title = '点击跳转到 CCF 官方目录，可用简称继续检索';
+            info.appendChild(ccfItem);
+
+            const ccfLevelItem = createInfoItem('📊 CCF等级', ccfVenue.level);
+            info.appendChild(ccfLevelItem);
+        } else {
+            const ccfItem = createLinkItem('🏷️ CCF目录', '去官网检索', CCF_DIRECTORY_URL);
+            ccfItem.title = '当前未匹配到内置简称，可打开 CCF 官方目录手动查询';
+            info.appendChild(ccfItem);
+        }
     } else {
         // 如果没有venue信息，显示提示
         const venueItem = createInfoItem('📄 发表状态', '未找到发表信息');
         info.appendChild(venueItem);
+
+        const ccfItem = createLinkItem('🏷️ CCF目录', '去官网检索', CCF_DIRECTORY_URL);
+        ccfItem.title = '可打开 CCF 官方目录手动查询';
+        info.appendChild(ccfItem);
     }
     
     // 年份
