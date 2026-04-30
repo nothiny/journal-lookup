@@ -2,6 +2,8 @@
 const SEMANTIC_SCHOLAR_API = 'https://api.semanticscholar.org/graph/v1/paper/search';
 const REQUEST_TIMEOUT = 15000; // 15秒超时
 const MAX_RETRIES = 2; // 最大重试次数
+const MIN_SEARCH_INTERVAL = 1500; // 最小搜索间隔，避免过快触发限流
+const DEFAULT_RATE_LIMIT_COOLDOWN = 10000; // 429后的默认冷却时间
 
 // DOM元素
 const paperInput = document.getElementById('paperInput');
@@ -10,6 +12,42 @@ const loadingIndicator = document.getElementById('loadingIndicator');
 const resultsContainer = document.getElementById('resultsContainer');
 const resultsList = document.getElementById('resultsList');
 const errorMessage = document.getElementById('errorMessage');
+
+// 请求状态
+let isSearching = false;
+let lastRequestTimestamp = 0;
+let rateLimitCooldownUntil = 0;
+const searchCache = new Map();
+
+function normalizeQuery(query) {
+    return query.trim().toLowerCase();
+}
+
+function getRemainingCooldownSeconds() {
+    return Math.max(1, Math.ceil((rateLimitCooldownUntil - Date.now()) / 1000));
+}
+
+function parseRetryAfterSeconds(value) {
+    if (!value) return null;
+
+    const asSeconds = Number(value);
+    if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+        return asSeconds;
+    }
+
+    const retryDate = new Date(value);
+    const delayMs = retryDate.getTime() - Date.now();
+    if (Number.isFinite(delayMs) && delayMs > 0) {
+        return Math.ceil(delayMs / 1000);
+    }
+
+    return null;
+}
+
+function setSearchControlsDisabled(disabled) {
+    searchBtn.disabled = disabled;
+    paperInput.disabled = disabled;
+}
 
 // 带超时的 fetch 请求
 async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT) {
@@ -47,6 +85,38 @@ async function searchPaper(query, retryCount = 0) {
         return;
     }
 
+    const normalizedQuery = normalizeQuery(query);
+
+    if (isSearching && retryCount === 0) {
+        showError('请求进行中，请稍候再试');
+        return;
+    }
+
+    if (Date.now() < rateLimitCooldownUntil) {
+        showError(`请求过于频繁，请在 ${getRemainingCooldownSeconds()} 秒后重试`);
+        return;
+    }
+
+    if (retryCount === 0) {
+        const cachedResult = searchCache.get(normalizedQuery);
+        if (cachedResult) {
+            hideError();
+            if (cachedResult.length > 0) {
+                displayResults(cachedResult, query);
+            } else {
+                showNoResults();
+            }
+            return;
+        }
+
+        const elapsedSinceLastRequest = Date.now() - lastRequestTimestamp;
+        if (elapsedSinceLastRequest < MIN_SEARCH_INTERVAL) {
+            const waitSeconds = Math.max(1, Math.ceil((MIN_SEARCH_INTERVAL - elapsedSinceLastRequest) / 1000));
+            showError(`请求过于频繁，请在 ${waitSeconds} 秒后重试`);
+            return;
+        }
+    }
+
     // 检查网络连接
     if (!checkNetworkConnection()) {
         showError('网络未连接，请检查您的网络设置');
@@ -54,6 +124,9 @@ async function searchPaper(query, retryCount = 0) {
     }
 
     // 显示加载状态
+    isSearching = true;
+    lastRequestTimestamp = Date.now();
+    setSearchControlsDisabled(true);
     showLoading();
     hideResults();
     hideError();
@@ -67,7 +140,9 @@ async function searchPaper(query, retryCount = 0) {
         if (!response.ok) {
             // 处理不同的HTTP状态码
             if (response.status === 429) {
-                throw new Error('RATE_LIMIT');
+                const rateLimitError = new Error('RATE_LIMIT');
+                rateLimitError.retryAfterSeconds = parseRetryAfterSeconds(response.headers.get('Retry-After'));
+                throw rateLimitError;
             } else if (response.status === 503) {
                 throw new Error('SERVICE_UNAVAILABLE');
             } else if (response.status >= 500) {
@@ -80,8 +155,10 @@ async function searchPaper(query, retryCount = 0) {
         const data = await response.json();
         
         if (data.data && data.data.length > 0) {
+            searchCache.set(normalizedQuery, data.data);
             displayResults(data.data, query);
         } else {
+            searchCache.set(normalizedQuery, []);
             showNoResults();
         }
     } catch (error) {
@@ -100,7 +177,9 @@ async function searchPaper(query, retryCount = 0) {
             errorMsg = '网络连接失败，可能的原因：\n• 网络连接不稳定\n• API服务暂时不可用\n• 浏览器安全策略限制\n\n请检查网络连接后重试';
             shouldRetry = retryCount < MAX_RETRIES;
         } else if (error.message === 'RATE_LIMIT') {
-            errorMsg = '请求过于频繁，API速率限制。请等待几秒后重试';
+            const retryAfterSeconds = error.retryAfterSeconds || DEFAULT_RATE_LIMIT_COOLDOWN / 1000;
+            rateLimitCooldownUntil = Date.now() + retryAfterSeconds * 1000;
+            errorMsg = `请求过于频繁，API速率限制。请在 ${retryAfterSeconds} 秒后重试`;
         } else if (error.message === 'SERVICE_UNAVAILABLE') {
             errorMsg = 'API服务暂时不可用，请稍后再试';
             shouldRetry = retryCount < MAX_RETRIES;
@@ -123,6 +202,8 @@ async function searchPaper(query, retryCount = 0) {
         
         showError(errorMsg);
     } finally {
+        isSearching = false;
+        setSearchControlsDisabled(false);
         hideLoading();
     }
 }
@@ -472,35 +553,12 @@ paperInput.addEventListener('keypress', (e) => {
     }
 });
 
-// 输入时实时搜索（防抖）
-let searchTimeout;
-let lastSearchQuery = '';
-
 paperInput.addEventListener('input', (e) => {
-    clearTimeout(searchTimeout);
-    const query = e.target.value.trim();
-    
-    // 如果输入为空，隐藏结果
-    if (query.length === 0) {
+    if (e.target.value.trim().length === 0) {
         hideResults();
         hideError();
         hideLoading();
-        lastSearchQuery = '';
-        return;
     }
-    
-    // 如果查询与上次相同，不重复搜索
-    if (query === lastSearchQuery) {
-        return;
-    }
-    
-    // 延迟搜索（防抖，500ms）
-    searchTimeout = setTimeout(() => {
-        if (query.length >= 3) { // 至少3个字符才开始搜索
-            lastSearchQuery = query;
-            searchPaper(query);
-        }
-    }, 500);
 });
 
 // 监听网络状态变化
@@ -513,4 +571,3 @@ window.addEventListener('offline', () => {
     console.log('网络连接已断开');
     showError('网络连接已断开，请检查您的网络设置');
 });
-
