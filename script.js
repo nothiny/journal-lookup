@@ -1,10 +1,14 @@
 // API配置
-const SEMANTIC_SCHOLAR_API = 'https://api.semanticscholar.org/graph/v1/paper/search';
+const DBLP_PUBLICATION_API = 'https://dblp.org/search/publ/api';
+const CROSSREF_WORKS_API = 'https://api.crossref.org/works';
 const CCF_DIRECTORY_URL = 'https://www.ccf.org.cn/Academic_Evaluation/By_category/';
 const REQUEST_TIMEOUT = 15000; // 15秒超时
-const MAX_RETRIES = 2; // 最大重试次数
+const MAX_RETRIES = 1; // 最大重试次数
 const MIN_SEARCH_INTERVAL = 1500; // 最小搜索间隔，避免过快触发限流
 const DEFAULT_RATE_LIMIT_COOLDOWN = 10000; // 429后的默认冷却时间
+const DBLP_RESULT_LIMIT = 10;
+const CROSSREF_RESULT_LIMIT = 5;
+const CROSSREF_MAILTO = 'noreply@example.com';
 
 const CCF_VENUE_MAPPINGS = [
     { abbr: 'AAAI', level: 'A', aliases: ['aaai', 'aaai conference on artificial intelligence'] },
@@ -128,6 +132,19 @@ function setSearchControlsDisabled(disabled) {
     paperInput.disabled = disabled;
 }
 
+function escapeHtml(text) {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function stripHtmlTags(text) {
+    return text.replace(/<[^>]+>/g, '').trim();
+}
+
 function resolveCcfVenue(paper) {
     const candidates = [
         getVenueInfo(paper),
@@ -145,6 +162,174 @@ function resolveCcfVenue(paper) {
     }
 
     return null;
+}
+
+function fetchJsonp(url, timeout = REQUEST_TIMEOUT) {
+    return new Promise((resolve, reject) => {
+        const callbackName = `jsonpCallback_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const script = document.createElement('script');
+        const timeoutId = setTimeout(() => {
+            cleanup();
+            reject(new Error('请求超时，请检查网络连接或稍后重试'));
+        }, timeout);
+
+        function cleanup() {
+            clearTimeout(timeoutId);
+            delete window[callbackName];
+            if (script.parentNode) {
+                script.parentNode.removeChild(script);
+            }
+        }
+
+        window[callbackName] = (data) => {
+            cleanup();
+            resolve(data);
+        };
+
+        script.onerror = () => {
+            cleanup();
+            reject(new Error('JSONP_REQUEST_FAILED'));
+        };
+
+        script.src = `${url}${url.includes('?') ? '&' : '?'}callback=${callbackName}`;
+        document.body.appendChild(script);
+    });
+}
+
+function getDblpAuthors(authorsField) {
+    if (!authorsField || !authorsField.author) return [];
+
+    const authors = Array.isArray(authorsField.author)
+        ? authorsField.author
+        : [authorsField.author];
+
+    return authors
+        .map(author => typeof author === 'string' ? author : author.text)
+        .filter(Boolean)
+        .map(name => ({ name }));
+}
+
+function normalizeDblpHit(hit) {
+    const info = hit.info || {};
+    const venue = info.venue || '';
+    const title = stripHtmlTags(info.title || '未知标题');
+    const eeValues = Array.isArray(info.ee) ? info.ee : (info.ee ? [info.ee] : []);
+    const doiValue = eeValues.find(value => typeof value === 'string' && value.toLowerCase().includes('doi.org/'));
+    const externalIds = {};
+
+    if (info.doi) {
+        externalIds.DOI = info.doi;
+    } else if (doiValue) {
+        externalIds.DOI = doiValue.replace(/^https?:\/\/doi\.org\//i, '');
+    }
+
+    return {
+        title,
+        authors: getDblpAuthors(info.authors),
+        year: info.year ? Number(info.year) : null,
+        venue,
+        publicationVenue: venue ? { name: venue } : null,
+        externalIds,
+        citationCount: undefined,
+        paperId: info.key || null,
+        url: typeof info.url === 'string' ? info.url : (eeValues[0] || null)
+    };
+}
+
+function getCrossrefYear(item) {
+    const dateSources = [
+        item['published-print'],
+        item['published-online'],
+        item.published,
+        item.issued
+    ].filter(Boolean);
+
+    for (const source of dateSources) {
+        const parts = source['date-parts'];
+        if (Array.isArray(parts) && Array.isArray(parts[0]) && parts[0][0]) {
+            return Number(parts[0][0]);
+        }
+    }
+
+    return null;
+}
+
+function normalizeCrossrefItem(item) {
+    const containerTitle = Array.isArray(item['container-title']) ? item['container-title'][0] : '';
+    const shortContainerTitle = Array.isArray(item['short-container-title']) ? item['short-container-title'][0] : '';
+    const venue = containerTitle || shortContainerTitle || '';
+    const externalIds = {};
+
+    if (item.DOI) {
+        externalIds.DOI = item.DOI;
+    }
+
+    return {
+        title: Array.isArray(item.title) && item.title[0] ? item.title[0] : '未知标题',
+        authors: Array.isArray(item.author)
+            ? item.author.map(author => ({
+                name: [author.given, author.family].filter(Boolean).join(' ').trim() || author.name || '未知作者'
+            }))
+            : [],
+        year: getCrossrefYear(item),
+        venue,
+        publicationVenue: venue ? { name: venue } : null,
+        externalIds,
+        citationCount: item['is-referenced-by-count'],
+        paperId: item.DOI || item.URL || null,
+        url: item.URL || (item.DOI ? `https://doi.org/${item.DOI}` : null)
+    };
+}
+
+async function searchDblp(query) {
+    const url = `${DBLP_PUBLICATION_API}?q=${encodeURIComponent(query)}&format=jsonp&h=${DBLP_RESULT_LIMIT}`;
+    const data = await fetchJsonp(url);
+    const hits = data?.result?.hits?.hit;
+
+    if (!hits) return [];
+
+    const hitList = Array.isArray(hits) ? hits : [hits];
+    return hitList.map(normalizeDblpHit).filter(paper => paper.title);
+}
+
+async function searchCrossref(query) {
+    const response = await fetchWithTimeout(
+        `${CROSSREF_WORKS_API}?query.title=${encodeURIComponent(query)}&rows=${CROSSREF_RESULT_LIMIT}&mailto=${encodeURIComponent(CROSSREF_MAILTO)}`
+    );
+
+    if (!response.ok) {
+        if (response.status === 429) {
+            const rateLimitError = new Error('RATE_LIMIT');
+            rateLimitError.retryAfterSeconds = parseRetryAfterSeconds(response.headers.get('Retry-After'));
+            throw rateLimitError;
+        } else if (response.status === 503) {
+            throw new Error('SERVICE_UNAVAILABLE');
+        } else if (response.status >= 500) {
+            throw new Error('SERVER_ERROR');
+        } else {
+            throw new Error(`API请求失败: ${response.status}`);
+        }
+    }
+
+    const data = await response.json();
+    const items = data?.message?.items || [];
+    return items.map(normalizeCrossrefItem).filter(paper => paper.title);
+}
+
+async function searchPaperSources(query) {
+    try {
+        const dblpResults = await searchDblp(query);
+        if (dblpResults.length > 0) {
+            return dblpResults;
+        }
+    } catch (error) {
+        console.warn('DBLP 查询失败，尝试使用 Crossref 兜底:', error);
+        if (error.message === '请求超时，请检查网络连接或稍后重试') {
+            throw error;
+        }
+    }
+
+    return searchCrossref(query);
 }
 
 // 带超时的 fetch 请求
@@ -230,31 +415,11 @@ async function searchPaper(query, retryCount = 0) {
     hideError();
 
     try {
-        // 使用Semantic Scholar API搜索（带超时）
-        const response = await fetchWithTimeout(
-            `${SEMANTIC_SCHOLAR_API}?query=${encodeURIComponent(query)}&limit=10&fields=title,authors,year,venue,publicationVenue,externalIds,citationCount,paperId,url`
-        );
-
-        if (!response.ok) {
-            // 处理不同的HTTP状态码
-            if (response.status === 429) {
-                const rateLimitError = new Error('RATE_LIMIT');
-                rateLimitError.retryAfterSeconds = parseRetryAfterSeconds(response.headers.get('Retry-After'));
-                throw rateLimitError;
-            } else if (response.status === 503) {
-                throw new Error('SERVICE_UNAVAILABLE');
-            } else if (response.status >= 500) {
-                throw new Error('SERVER_ERROR');
-            } else {
-                throw new Error(`API请求失败: ${response.status}`);
-            }
-        }
-
-        const data = await response.json();
+        const papers = await searchPaperSources(query);
         
-        if (data.data && data.data.length > 0) {
-            searchCache.set(normalizedQuery, data.data);
-            displayResults(data.data, query);
+        if (papers.length > 0) {
+            searchCache.set(normalizedQuery, papers);
+            displayResults(papers, query);
         } else {
             searchCache.set(normalizedQuery, []);
             showNoResults();
@@ -269,25 +434,27 @@ async function searchPaper(query, retryCount = 0) {
         if (error.message.includes('请求超时') || error.message.includes('AbortError')) {
             errorMsg = '请求超时，可能是网络较慢或API响应延迟';
             shouldRetry = retryCount < MAX_RETRIES;
+        } else if (error.message === 'JSONP_REQUEST_FAILED') {
+            errorMsg = '主数据源暂时不可用，备用网址查询也失败了，请稍后再试';
         } else if (error.message.includes('Failed to fetch') || 
                    error.message.includes('NetworkError') ||
                    error.message.includes('Network request failed')) {
-            errorMsg = '网络连接失败，可能的原因：\n• 网络连接不稳定\n• API服务暂时不可用\n• 浏览器安全策略限制\n\n请检查网络连接后重试';
+            errorMsg = '网络连接失败，可能的原因：\n• 网络连接不稳定\n• Crossref 服务暂时不可用\n• 浏览器安全策略限制\n\n请检查网络连接后重试';
             shouldRetry = retryCount < MAX_RETRIES;
         } else if (error.message === 'RATE_LIMIT') {
             const retryAfterSeconds = error.retryAfterSeconds || DEFAULT_RATE_LIMIT_COOLDOWN / 1000;
             rateLimitCooldownUntil = Date.now() + retryAfterSeconds * 1000;
-            errorMsg = `请求过于频繁，API速率限制。请在 ${retryAfterSeconds} 秒后重试`;
+            errorMsg = `请求过于频繁，Crossref 速率限制。请在 ${retryAfterSeconds} 秒后重试`;
         } else if (error.message === 'SERVICE_UNAVAILABLE') {
-            errorMsg = 'API服务暂时不可用，请稍后再试';
+            errorMsg = '备用数据源暂时不可用，请稍后再试';
             shouldRetry = retryCount < MAX_RETRIES;
         } else if (error.message === 'SERVER_ERROR') {
-            errorMsg = '服务器错误，请稍后重试';
+            errorMsg = '数据源服务器错误，请稍后重试';
             shouldRetry = retryCount < MAX_RETRIES;
         } else if (error.message.includes('CORS')) {
             errorMsg = '跨域请求被阻止，可能是浏览器安全设置或网络问题';
         } else {
-            errorMsg = `搜索失败: ${error.message}\n\n可能的原因：\n• 网络连接问题\n• API服务暂时不可用\n• 请求超时\n\n请稍后重试`;
+            errorMsg = `搜索失败: ${error.message}\n\n可能的原因：\n• 网络连接问题\n• 数据源暂时不可用\n• 请求超时\n\n请稍后重试`;
             shouldRetry = retryCount < MAX_RETRIES;
         }
         
